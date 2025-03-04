@@ -8,9 +8,11 @@ import requests
 import json
 import shutil
 import base64
+import re
 from datetime import datetime
 from groq import Groq
 from openai import OpenAI  # Updated import
+import yt_dlp  # Added for YouTube downloading
 
 def is_ffmpeg_installed():
     try:
@@ -288,6 +290,139 @@ def apply_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
+def is_valid_youtube_url(url):
+    """Check if the URL is a valid YouTube URL."""
+    youtube_regex = (
+        r'(https?://)?(www\.)?'
+        r'(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        r'(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+    )
+    match = re.match(youtube_regex, url)
+    return bool(match)
+
+def get_youtube_video_id(url):
+    """Extract the video ID from a YouTube URL."""
+    youtube_regex = (
+        r'(https?://)?(www\.)?'
+        r'(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        r'(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
+    )
+    match = re.match(youtube_regex, url)
+    if match:
+        return match.group(6)
+    return None
+
+def download_youtube_audio(url, progress_callback=None):
+    """Download audio from a YouTube video."""
+    # Create a temporary directory to store files
+    temp_dir = tempfile.mkdtemp()
+    temp_base = os.path.join(temp_dir, "youtube_audio")
+    output_file = f"{temp_base}.mp3"
+    
+    # More reliable options for yt-dlp
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'paths': {'temp': temp_dir, 'home': temp_dir},
+        'outtmpl': temp_base,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,  # Continue on download errors
+        'nooverwrites': False, # Overwrite existing files
+        'writethumbnail': False,
+        'verbose': False
+    }
+    
+    if progress_callback:
+        ydl_opts['progress_hooks'] = [progress_callback]
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception("Failed to extract video information")
+        
+        # Check for the expected output file
+        expected_output = f"{temp_base}.mp3"
+        if os.path.exists(expected_output):
+            return expected_output
+            
+        # If the expected file doesn't exist, look for any audio file in the temp directory
+        for file in os.listdir(temp_dir):
+            if file.endswith(('.mp3', '.m4a', '.wav', '.aac')):
+                return os.path.join(temp_dir, file)
+                
+        # If we still don't have a file, try a direct approach with ffmpeg
+        video_id = get_youtube_video_id(url)
+        if video_id:
+            direct_url = f"https://www.youtube.com/watch?v={video_id}"
+            fallback_output = os.path.join(temp_dir, "direct_audio.mp3")
+            cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', fallback_output, direct_url]
+            subprocess.run(cmd, check=True, capture_output=True)
+            if os.path.exists(fallback_output):
+                return fallback_output
+                
+        raise Exception("No audio file was downloaded")
+    except Exception as e:
+        # Clean up temp directory on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise Exception(f"Failed to download YouTube video: {str(e)}")
+
+def is_ytdlp_installed():
+    """Check if yt-dlp is installed and working properly."""
+    try:
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True)
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+def download_youtube_audio_direct(url):
+    """Download audio from a YouTube video using direct command-line approach."""
+    temp_dir = tempfile.mkdtemp()
+    output_file = os.path.join(temp_dir, "audio.mp3")
+    
+    # Try yt-dlp first
+    try:
+        cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', output_file, url]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if os.path.exists(output_file):
+            return output_file
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # Try youtube-dl as fallback
+    try:
+        cmd = ['youtube-dl', '-x', '--audio-format', 'mp3', '-o', output_file, url]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if os.path.exists(output_file):
+            return output_file
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # If both failed, try ffmpeg directly if we can get a direct stream URL
+    try:
+        # Get stream URL using yt-dlp
+        cmd = ['yt-dlp', '-f', 'bestaudio', '-g', url]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        stream_url = result.stdout.strip()
+        
+        if stream_url:
+            # Download with ffmpeg
+            cmd = ['ffmpeg', '-i', stream_url, '-acodec', 'mp3', '-y', output_file]
+            subprocess.run(cmd, capture_output=True, check=True)
+            if os.path.exists(output_file):
+                return output_file
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # Clean up if all methods failed
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    raise Exception("Failed to download YouTube audio using all available methods")
+
 def main():
     # Initialize session state variables
     if 'transcript' not in st.session_state:
@@ -412,6 +547,9 @@ def main():
         """)
         st.stop()
     
+    # Check if yt-dlp is installed
+    ytdlp_installed = is_ytdlp_installed()
+    
     # Create tabs
     tab1, tab2, tab3 = st.tabs(["📤 Upload & Transcribe", "✏️ Edit Transcript", "💾 Export"])
     
@@ -452,6 +590,118 @@ def main():
             st.subheader("Upload Audio or Video File")
             uploaded_file = st.file_uploader("Choose an audio or video file", type=["mp3", "mp4", "mpeg", "mpga", "m4a", "wav", "webm", "avi", "mov", "mkv", "flv", "wmv"])
             st.markdown('<p class="file-formats">Supported formats: MP3, MP4, MPEG, MPGA, M4A, WAV, WEBM, AVI, MOV, MKV, FLV, WMV</p>', unsafe_allow_html=True)
+
+            # Add YouTube URL input
+            st.subheader("Or Transcribe from YouTube")
+            
+            if not ytdlp_installed:
+                st.warning("""
+                yt-dlp is not installed or not working properly. YouTube transcription requires yt-dlp.
+                
+                Installation instructions:
+                
+                ```
+                pip install yt-dlp
+                ```
+                
+                After installation, please restart this application.
+                """)
+            else:
+                youtube_url = st.text_input("Enter YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
+                is_valid_url = is_valid_youtube_url(youtube_url) if youtube_url else False
+                
+                if youtube_url and not is_valid_url:
+                    st.error("Please enter a valid YouTube URL")
+                elif youtube_url and is_valid_url:
+                    video_id = get_youtube_video_id(youtube_url)
+                    st.video(f"https://www.youtube.com/watch?v={video_id}")
+                    
+                    youtube_process_button = st.button("🎬 Transcribe YouTube Video", use_container_width=True)
+                    
+                    if youtube_process_button:
+                        with st.status("Processing YouTube video...", expanded=True) as status:
+                            try:
+                                # Download YouTube audio
+                                status.update(label="Downloading audio from YouTube...", state="running")
+                                
+                                # Define progress callback
+                                progress_placeholder = st.empty()
+                                
+                                def yt_progress_hook(d):
+                                    if d['status'] == 'downloading':
+                                        try:
+                                            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                                            downloaded = d.get('downloaded_bytes', 0)
+                                            if total_bytes > 0:
+                                                progress = (downloaded / total_bytes) * 100
+                                                progress_placeholder.progress(int(progress))
+                                                status.update(label=f"Downloading: {progress:.1f}% of {total_bytes/1024/1024:.1f} MB", state="running")
+                                        except:
+                                            pass
+                                
+                                # Download the audio
+                                try:
+                                    audio_file = download_youtube_audio(youtube_url, yt_progress_hook)
+                                    status.update(label="Download complete!", state="running")
+                                except Exception as e:
+                                    status.update(label="Primary download method failed. Trying alternative method...", state="running")
+                                    try:
+                                        audio_file = download_youtube_audio_direct(youtube_url)
+                                        status.update(label="Download complete using alternative method!", state="running")
+                                    except Exception as e2:
+                                        raise Exception(f"All download methods failed. Primary error: {str(e)}. Secondary error: {str(e2)}")
+                                
+                                # Check if compression is needed
+                                audio_file_size = os.path.getsize(audio_file) / (1024 * 1024)  # Audio file size in MB
+                                if audio_file_size > 25:
+                                    status.update(label="File size exceeds 25MB. Compressing...", state="running")
+                                    input_file = compress_audio(audio_file)
+                                    status.update(label="Compression complete.", state="running")
+                                else:
+                                    status.update(label="File size is within the allowed limit. No compression needed.", state="running")
+                                    input_file = audio_file
+                                
+                                # Transcribe the audio
+                                status.update(label=f"Transcribing audio using {api_choice} API...", state="running")
+                                try:
+                                    if api_choice == "OpenAI":
+                                        st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_openai(
+                                            input_file, 
+                                            language=selected_language
+                                        )
+                                    elif api_choice == "Groq":
+                                        st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_groq(
+                                            input_file,
+                                            language=selected_language
+                                        )
+                                    else:  # Fal
+                                        st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_fal(
+                                            input_file,
+                                            language=selected_language
+                                        )
+                                    
+                                    # Add to history
+                                    video_title = f"YouTube: {video_id}"
+                                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                    st.session_state.history.append((timestamp, video_title, st.session_state.transcript))
+                                    # Keep only the last 10 items
+                                    st.session_state.history = st.session_state.history[-10:]
+                                    
+                                    status.update(label=f"Transcription complete! Time taken: {st.session_state.transcription_time:.2f} seconds", state="complete")
+                                except Exception as e:
+                                    error_msg = str(e)
+                                    st.error(f"Transcription failed: {error_msg}")
+                                    status.update(label="Transcription failed.", state="error")
+                                
+                                # Cleanup
+                                if os.path.exists(audio_file):
+                                    os.unlink(audio_file)
+                                if 'input_file' in locals() and input_file != audio_file and os.path.exists(input_file):
+                                    os.unlink(input_file)
+                                    
+                            except Exception as e:
+                                st.error(f"Failed to process YouTube video: {str(e)}")
+                                status.update(label="Failed to process YouTube video.", state="error")
 
             if uploaded_file is not None:
                 # Determine if the file is a video
