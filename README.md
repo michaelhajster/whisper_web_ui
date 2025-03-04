@@ -10,6 +10,7 @@ This project provides both a Streamlit web application (`whisper_webui.py`) and 
 - Support for multiple audio formats (mp3, mp4, mpeg, mpga, m4a, wav, webm)
 - Support for video files (mp4, avi, mov, mkv, flv, wmv) with automatic audio extraction
 - **Direct transcription from YouTube URLs** - simply paste a YouTube link and get transcription
+- **Persistent local storage** of all transcriptions in SQLite database
 - Transcription using Whisper models through OpenAI, Groq, or Fal API
 - Display of transcription time and results
 - Option to copy transcript to clipboard
@@ -117,6 +118,23 @@ Examples:
 If using the Fal.ai API for transcription, the application uploads your audio file to tmpfiles.org. This step is necessary because the Fal API requires input files to be accessible via a public URL.
 
 Please ensure that you have the necessary rights to upload and make your audio public. Do not use this method for sensitive recordings.
+
+## Transcription History
+
+All transcriptions are automatically saved to a local SQLite database in the `data` directory. This provides several benefits:
+
+- **Persistent Storage**: Transcriptions are saved between sessions
+- **Search Functionality**: Search through all your past transcriptions
+- **Favorites**: Mark important transcriptions as favorites
+- **Export**: Export your transcription history to JSON format
+
+The History tab provides a complete interface for managing your transcription history:
+
+1. **Browse**: View all your past transcriptions with details like source, date, and API used
+2. **Search**: Find specific transcriptions by keyword
+3. **Filter**: Show only favorite transcriptions
+4. **Actions**: Load transcriptions to the editor, copy to clipboard, mark as favorite, or delete
+5. **Export**: Export your entire history to a JSON file for backup or analysis
 
 ## Troubleshooting
 

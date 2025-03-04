@@ -9,10 +9,155 @@ import json
 import shutil
 import base64
 import re
+import sqlite3
 from datetime import datetime
 from groq import Groq
 from openai import OpenAI  # Updated import
 import yt_dlp  # Added for YouTube downloading
+
+# Database setup
+def get_db_path():
+    """Get the path to the SQLite database file."""
+    # Create a data directory in the same folder as the script
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "transcription_history.db")
+
+def init_db():
+    """Initialize the database with the necessary tables."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    # Create transcriptions table
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS transcriptions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        api_used TEXT NOT NULL,
+        language TEXT NOT NULL,
+        duration REAL,
+        transcript TEXT NOT NULL,
+        favorite BOOLEAN DEFAULT 0
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def save_transcription(source_name, source_type, api_used, language, duration, transcript):
+    """Save a transcription to the database."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute('''
+    INSERT INTO transcriptions 
+    (timestamp, source_name, source_type, api_used, language, duration, transcript)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (timestamp, source_name, source_type, api_used, language, duration, transcript))
+    
+    conn.commit()
+    conn.close()
+    
+    return cursor.lastrowid
+
+def get_transcription_history(limit=100, offset=0, search_term=None):
+    """Get transcription history from the database."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    if search_term:
+        cursor.execute('''
+        SELECT id, timestamp, source_name, source_type, api_used, language, duration, transcript, favorite
+        FROM transcriptions
+        WHERE transcript LIKE ? OR source_name LIKE ?
+        ORDER BY timestamp DESC
+        LIMIT ? OFFSET ?
+        ''', (f'%{search_term}%', f'%{search_term}%', limit, offset))
+    else:
+        cursor.execute('''
+        SELECT id, timestamp, source_name, source_type, api_used, language, duration, transcript, favorite
+        FROM transcriptions
+        ORDER BY timestamp DESC
+        LIMIT ? OFFSET ?
+        ''', (limit, offset))
+    
+    results = cursor.fetchall()
+    conn.close()
+    
+    return results
+
+def get_transcription_by_id(transcription_id):
+    """Get a specific transcription by ID."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT id, timestamp, source_name, source_type, api_used, language, duration, transcript, favorite
+    FROM transcriptions
+    WHERE id = ?
+    ''', (transcription_id,))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    return result
+
+def toggle_favorite(transcription_id, favorite_status):
+    """Toggle the favorite status of a transcription."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    UPDATE transcriptions
+    SET favorite = ?
+    WHERE id = ?
+    ''', (1 if favorite_status else 0, transcription_id))
+    
+    conn.commit()
+    conn.close()
+
+def delete_transcription(transcription_id):
+    """Delete a transcription from the database."""
+    conn = sqlite3.connect(get_db_path())
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    DELETE FROM transcriptions
+    WHERE id = ?
+    ''', (transcription_id,))
+    
+    conn.commit()
+    conn.close()
+
+def export_transcriptions_to_json(file_path):
+    """Export all transcriptions to a JSON file."""
+    conn = sqlite3.connect(get_db_path())
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT id, timestamp, source_name, source_type, api_used, language, duration, transcript, favorite
+    FROM transcriptions
+    ORDER BY timestamp DESC
+    ''')
+    
+    rows = cursor.fetchall()
+    conn.close()
+    
+    # Convert rows to dictionaries
+    transcriptions = []
+    for row in rows:
+        transcriptions.append(dict(row))
+    
+    with open(file_path, 'w') as f:
+        json.dump(transcriptions, f, indent=4)
+
+# Initialize database at startup
+init_db()
 
 def is_ffmpeg_installed():
     try:
@@ -551,7 +696,7 @@ def main():
     ytdlp_installed = is_ytdlp_installed()
     
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["📤 Upload & Transcribe", "✏️ Edit Transcript", "💾 Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📤 Upload & Transcribe", "✏️ Edit Transcript", "💾 Export", "📚 History"])
     
     with tab1:
         # API selection
@@ -687,6 +832,26 @@ def main():
                                     # Keep only the last 10 items
                                     st.session_state.history = st.session_state.history[-10:]
                                     
+                                    # Save to database
+                                    try:
+                                        # Get duration if available
+                                        duration = None
+                                        try:
+                                            duration = get_audio_info(input_file)
+                                        except:
+                                            pass
+                                            
+                                        save_transcription(
+                                            source_name=video_title,
+                                            source_type="youtube",
+                                            api_used=api_choice,
+                                            language=selected_language,
+                                            duration=duration,
+                                            transcript=st.session_state.transcript
+                                        )
+                                    except Exception as db_error:
+                                        st.warning(f"Failed to save to history database: {str(db_error)}")
+                                    
                                     status.update(label=f"Transcription complete! Time taken: {st.session_state.transcription_time:.2f} seconds", state="complete")
                                 except Exception as e:
                                     error_msg = str(e)
@@ -776,6 +941,26 @@ def main():
                             st.session_state.history.append((timestamp, uploaded_file.name, st.session_state.transcript))
                             # Keep only the last 10 items
                             st.session_state.history = st.session_state.history[-10:]
+                            
+                            # Save to database
+                            try:
+                                # Get duration if available
+                                duration = None
+                                try:
+                                    duration = get_audio_info(input_file)
+                                except:
+                                    pass
+                                    
+                                save_transcription(
+                                    source_name=uploaded_file.name,
+                                    source_type="local",
+                                    api_used=api_choice,
+                                    language=selected_language,
+                                    duration=duration,
+                                    transcript=st.session_state.transcript
+                                )
+                            except Exception as db_error:
+                                st.warning(f"Failed to save to history database: {str(db_error)}")
                             
                             status.update(label=f"Transcription complete! Time taken: {st.session_state.transcription_time:.2f} seconds", state="complete")
                         except Exception as e:
@@ -870,6 +1055,95 @@ def main():
                     st.warning("Please enter a filename to save the transcript.")
         else:
             st.info("No transcript available. Please upload and transcribe an audio file first.")
+
+    with tab4:
+        # History tab
+        st.subheader("📚 Transcription History")
+        
+        # Search functionality
+        search_col1, search_col2 = st.columns([3, 1])
+        with search_col1:
+            search_term = st.text_input("Search transcriptions", placeholder="Enter keywords to search...")
+        with search_col2:
+            st.write("")
+            st.write("")
+            show_favorites_only = st.checkbox("Favorites only")
+        
+        # Get transcription history from database
+        history = get_transcription_history(limit=100, search_term=search_term if search_term else None)
+        
+        if not history:
+            st.info("No transcription history found in the database.")
+        else:
+            # Display history in a table
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 1, 1, 1])
+            col1.subheader("Source")
+            col2.subheader("Date")
+            col3.subheader("API")
+            col4.subheader("Type")
+            col5.subheader("Actions")
+            
+            for record in history:
+                id, timestamp, source_name, source_type, api_used, language, duration, transcript, favorite = record
+                
+                # Skip non-favorites if showing favorites only
+                if show_favorites_only and not favorite:
+                    continue
+                
+                with st.expander(f"{source_name} ({timestamp})"):
+                    st.markdown(f"**Source:** {source_name}")
+                    st.markdown(f"**Date:** {timestamp}")
+                    st.markdown(f"**API Used:** {api_used}")
+                    st.markdown(f"**Language:** {language}")
+                    if duration:
+                        st.markdown(f"**Duration:** {duration:.2f} seconds")
+                    
+                    # Display transcript with copy button
+                    st.text_area("Transcript", transcript, height=200, key=f"transcript_{id}")
+                    
+                    # Action buttons
+                    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+                    
+                    with col1:
+                        if st.button("Load to Editor", key=f"load_{id}"):
+                            st.session_state.transcript = transcript
+                            st.rerun()
+                    
+                    with col2:
+                        if st.button("Copy", key=f"copy_{id}"):
+                            pyperclip.copy(transcript)
+                            st.success("Copied to clipboard!")
+                    
+                    with col3:
+                        if favorite:
+                            if st.button("Unfavorite", key=f"unfav_{id}"):
+                                toggle_favorite(id, False)
+                                st.rerun()
+                        else:
+                            if st.button("Favorite", key=f"fav_{id}"):
+                                toggle_favorite(id, True)
+                                st.rerun()
+                    
+                    with col4:
+                        if st.button("Delete", key=f"del_{id}"):
+                            delete_transcription(id)
+                            st.success("Transcription deleted!")
+                            st.rerun()
+            
+            # Export functionality
+            st.subheader("Export History")
+            export_col1, export_col2 = st.columns([3, 1])
+            with export_col1:
+                export_path = st.text_input("Export path", "transcription_history.json")
+            with export_col2:
+                st.write("")
+                st.write("")
+                if st.button("Export to JSON"):
+                    try:
+                        export_transcriptions_to_json(export_path)
+                        st.success(f"Successfully exported to {export_path}")
+                    except Exception as e:
+                        st.error(f"Export failed: {str(e)}")
 
 if __name__ == '__main__':
     main()

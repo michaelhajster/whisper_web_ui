@@ -5,3 +5,8 @@
 !*.py
 !.gitignore
 !requirements.txt
+!README.md
+!LICENSE
+
+# Ignore database directory
+data/
