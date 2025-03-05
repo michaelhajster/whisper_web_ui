@@ -10,6 +10,7 @@ This project provides both a Streamlit web application (`whisper_webui.py`) and 
 - Support for multiple audio formats (mp3, mp4, mpeg, mpga, m4a, wav, webm)
 - Support for video files (mp4, avi, mov, mkv, flv, wmv) with automatic audio extraction
 - **Direct transcription from YouTube URLs** - simply paste a YouTube link and get transcription
+- **Direct transcription from TikTok URLs** - transcribe TikTok videos by pasting a link
 - **Persistent local storage** of all transcriptions in SQLite database
 - Transcription using Whisper models through OpenAI, Groq, or Fal API
 - Display of transcription time and results

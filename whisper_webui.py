@@ -568,6 +568,140 @@ def download_youtube_audio_direct(url):
     shutil.rmtree(temp_dir, ignore_errors=True)
     raise Exception("Failed to download YouTube audio using all available methods")
 
+def is_valid_tiktok_url(url):
+    """Check if the URL is a valid TikTok URL."""
+    # Standard TikTok URL pattern
+    tiktok_regex = r'(https?://)?(www\.|vm\.|m\.)?tiktok\.com/(@[\w.-]+/video/\d+|v/\d+|[A-Za-z0-9]+/?)'
+    match = re.match(tiktok_regex, url)
+    return bool(match)
+
+def get_tiktok_video_id(url):
+    """Extract the video ID from a TikTok URL.
+    
+    This function handles various TikTok URL formats:
+    - https://www.tiktok.com/@username/video/1234567890123456789
+    - https://vm.tiktok.com/ABCDEF/
+    - https://m.tiktok.com/v/1234567890123456789.html
+    """
+    # Try to extract from standard format
+    standard_pattern = r'tiktok\.com/@[\w.-]+/video/(\d+)'
+    match = re.search(standard_pattern, url)
+    if match:
+        return match.group(1)
+    
+    # Try to extract from /v/ format
+    v_pattern = r'tiktok\.com/v/(\d+)'
+    match = re.search(v_pattern, url)
+    if match:
+        return match.group(1)
+    
+    # For shortened URLs, we'll just use the last path component
+    # This isn't a real ID but helps with identification
+    short_pattern = r'tiktok\.com/([A-Za-z0-9]+)/?$'
+    match = re.search(short_pattern, url)
+    if match:
+        return match.group(1)
+    
+    return None
+
+def download_tiktok_audio(url, progress_callback=None):
+    """Download audio from a TikTok video using yt-dlp."""
+    # This function is very similar to download_youtube_audio
+    # but with some TikTok-specific configurations
+    temp_dir = tempfile.mkdtemp()
+    temp_base = os.path.join(temp_dir, "tiktok_audio")
+    output_file = f"{temp_base}.mp3"
+    
+    # yt-dlp options for TikTok
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'paths': {'temp': temp_dir, 'home': temp_dir},
+        'outtmpl': temp_base,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+        'nooverwrites': False,
+        'writethumbnail': False,
+        'verbose': False,
+        # TikTok-specific options
+        'extractor_args': {
+            'tiktok': {
+                'api_hostname': 'api16-normal-c-useast1a.tiktokv.com',
+                'app_version': '20.2.1',
+                'manifest_app_version': '20.2.1',
+            }
+        }
+    }
+    
+    if progress_callback:
+        ydl_opts['progress_hooks'] = [progress_callback]
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception("Failed to extract video information")
+        
+        # Check for the expected output file
+        expected_output = f"{temp_base}.mp3"
+        if os.path.exists(expected_output):
+            return expected_output
+            
+        # If the expected file doesn't exist, look for any audio file in the temp directory
+        for file in os.listdir(temp_dir):
+            if file.endswith(('.mp3', '.m4a', '.wav', '.aac')):
+                return os.path.join(temp_dir, file)
+        
+        # If we still don't have a file, try a direct approach
+        video_id = get_tiktok_video_id(url)
+        if video_id:
+            fallback_output = os.path.join(temp_dir, "direct_audio.mp3")
+            cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', fallback_output, url]
+            subprocess.run(cmd, check=True, capture_output=True)
+            if os.path.exists(fallback_output):
+                return fallback_output
+                
+        raise Exception("No audio file was downloaded")
+    except Exception as e:
+        # Clean up temp directory on error
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise Exception(f"Failed to download TikTok video: {str(e)}")
+
+def download_tiktok_audio_direct(url):
+    """Download audio from a TikTok video using direct command-line approach."""
+    # Similar to download_youtube_audio_direct but for TikTok
+    temp_dir = tempfile.mkdtemp()
+    output_file = os.path.join(temp_dir, "audio.mp3")
+    
+    # Try yt-dlp first
+    try:
+        cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', '-o', output_file, url]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if os.path.exists(output_file):
+            return output_file
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # If yt-dlp fails, try a more direct approach with specific TikTok options
+    try:
+        cmd = ['yt-dlp', '-x', '--audio-format', 'mp3', 
+               '--extractor-args', 'tiktok:api_hostname=api16-normal-c-useast1a.tiktokv.com,app_version=20.2.1',
+               '-o', output_file, url]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        if os.path.exists(output_file):
+            return output_file
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    
+    # Clean up if all methods failed
+    shutil.rmtree(temp_dir, ignore_errors=True)
+    raise Exception("Failed to download TikTok audio using all available methods")
+
 def main():
     # Initialize session state variables
     if 'transcript' not in st.session_state:
@@ -867,6 +1001,128 @@ def main():
                             except Exception as e:
                                 st.error(f"Failed to process YouTube video: {str(e)}")
                                 status.update(label="Failed to process YouTube video.", state="error")
+
+            # Add TikTok URL input
+            st.subheader("Or Transcribe from TikTok")
+            
+            tiktok_url = st.text_input("Enter TikTok URL", placeholder="https://www.tiktok.com/@username/video/...")
+            is_valid_tiktok = is_valid_tiktok_url(tiktok_url) if tiktok_url else False
+            
+            if tiktok_url and not is_valid_tiktok:
+                st.error("Please enter a valid TikTok URL")
+            elif tiktok_url and is_valid_tiktok:
+                # For TikTok, we can't easily embed the video like YouTube
+                # So we'll just show the URL and a message
+                st.info(f"TikTok video: {tiktok_url}")
+                st.markdown("TikTok videos cannot be previewed directly. Click the button below to transcribe.")
+                
+                tiktok_process_button = st.button("📱 Transcribe TikTok Video", use_container_width=True)
+                
+                if tiktok_process_button:
+                    with st.status("Processing TikTok video...", expanded=True) as status:
+                        try:
+                            # Download TikTok audio
+                            status.update(label="Downloading audio from TikTok...", state="running")
+                            
+                            # Define progress callback
+                            progress_placeholder = st.empty()
+                            
+                            def tiktok_progress_hook(d):
+                                if d['status'] == 'downloading':
+                                    try:
+                                        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+                                        downloaded = d.get('downloaded_bytes', 0)
+                                        if total_bytes > 0:
+                                            progress = (downloaded / total_bytes) * 100
+                                            progress_placeholder.progress(int(progress))
+                                            status.update(label=f"Downloading: {progress:.1f}% of {total_bytes/1024/1024:.1f} MB", state="running")
+                                    except:
+                                        pass
+                            
+                            # Download the audio
+                            try:
+                                audio_file = download_tiktok_audio(tiktok_url, tiktok_progress_hook)
+                                status.update(label="Download complete!", state="running")
+                            except Exception as e:
+                                status.update(label="Primary download method failed. Trying alternative method...", state="running")
+                                try:
+                                    audio_file = download_tiktok_audio_direct(tiktok_url)
+                                    status.update(label="Download complete using alternative method!", state="running")
+                                except Exception as e2:
+                                    raise Exception(f"All download methods failed. Primary error: {str(e)}. Secondary error: {str(e2)}")
+                            
+                            # Check if compression is needed
+                            audio_file_size = os.path.getsize(audio_file) / (1024 * 1024)  # Audio file size in MB
+                            if audio_file_size > 25:
+                                status.update(label="File size exceeds 25MB. Compressing...", state="running")
+                                input_file = compress_audio(audio_file)
+                                status.update(label="Compression complete.", state="running")
+                            else:
+                                status.update(label="File size is within the allowed limit. No compression needed.", state="running")
+                                input_file = audio_file
+                            
+                            # Transcribe the audio
+                            status.update(label=f"Transcribing audio using {api_choice} API...", state="running")
+                            try:
+                                if api_choice == "OpenAI":
+                                    st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_openai(
+                                        input_file, 
+                                        language=selected_language
+                                    )
+                                elif api_choice == "Groq":
+                                    st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_groq(
+                                        input_file,
+                                        language=selected_language
+                                    )
+                                else:  # Fal
+                                    st.session_state.transcript, st.session_state.transcription_time = transcribe_audio_fal(
+                                        input_file,
+                                        language=selected_language
+                                    )
+                                
+                                # Add to history
+                                video_id = get_tiktok_video_id(tiktok_url)
+                                video_title = f"TikTok: {video_id}"
+                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+                                st.session_state.history.append((timestamp, video_title, st.session_state.transcript))
+                                # Keep only the last 10 items
+                                st.session_state.history = st.session_state.history[-10:]
+                                
+                                # Save to database
+                                try:
+                                    # Get duration if available
+                                    duration = None
+                                    try:
+                                        duration = get_audio_info(input_file)
+                                    except:
+                                        pass
+                                        
+                                    save_transcription(
+                                        source_name=video_title,
+                                        source_type="tiktok",
+                                        api_used=api_choice,
+                                        language=selected_language,
+                                        duration=duration,
+                                        transcript=st.session_state.transcript
+                                    )
+                                except Exception as db_error:
+                                    st.warning(f"Failed to save to history database: {str(db_error)}")
+                                
+                                status.update(label=f"Transcription complete! Time taken: {st.session_state.transcription_time:.2f} seconds", state="complete")
+                            except Exception as e:
+                                error_msg = str(e)
+                                st.error(f"Transcription failed: {error_msg}")
+                                status.update(label="Transcription failed.", state="error")
+                                
+                            # Cleanup
+                            if os.path.exists(audio_file):
+                                os.unlink(audio_file)
+                            if 'input_file' in locals() and input_file != audio_file and os.path.exists(input_file):
+                                os.unlink(input_file)
+                                
+                        except Exception as e:
+                            st.error(f"Failed to process TikTok video: {str(e)}")
+                            status.update(label="Failed to process TikTok video.", state="error")
 
             if uploaded_file is not None:
                 # Determine if the file is a video
